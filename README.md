@@ -55,7 +55,7 @@ I would like to demonstrate the following use case:
 
 The following diagram depicts the relationship between the different objects and GitOps instances. 
 
-![Correlation](images/correlation.png)
+![Correlation](images/correlation-diagram.png)
 
 ## Directory Structure
 
