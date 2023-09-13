@@ -74,7 +74,7 @@ The folder structure looks like the following:
  │  └──values-global.yaml
 ```
 
-Any customer/tenant/project is a separate folder. I am using the name of the application as separator, for example **my-main-app**. Below the application folder a folder for each cluster is created to distinguish the configuration for different clusters, for example **cluster-local**. Finally, in this folder a quite large **values.yaml** can be found that defines everything that is required for the project onboarding. 
+Any customer is a separate folder and any customer can have one or more Namespaces (Projects). I am using the name of the application as separator, for example **my-main-app**. Below the application folder a folder for each cluster is created to distinguish the configuration for different clusters, for example **cluster-local**. Finally, in this folder a quite large **values.yaml** can be found that defines everything that is required for the project onboarding. 
 
 The following ApplicationSet uses the files in **customer-projects/******/values.yaml** to fetch the parameters. 
 It generates an Application named "<customer-name>-<path-name>" and uses the Helm Chart [Project Onboarding](https://github.com/tjungbauer/openshift-cluster-bootstrap/clusters/all/project-onboarding) as source, providing two values-files:
