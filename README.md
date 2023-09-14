@@ -5,9 +5,9 @@
 During the phase of OpenShift deployments at one point the question about project onboarding comes up. 
 How can new customer or tenant be onboarded, so they can deploy their own workload onto the cluster(s)? While there are different ways from a process perspective (Service Now, Jira etc.) I focus on the Kubernetes objects that must be created at the end on each cluster.
 
-In [A Guide to GitOps and Argo CD with RABC](https://cloud.redhat.com/blog/a-guide-to-using-gitops-and-argocd-with-rbac) I described how to set up GitOps RBAC rules in a way customers can work with their (and only their) projects. 
+In [A Guide to GitOps and Argo CD with RABC](https://cloud.redhat.com/blog/a-guide-to-using-gitops-and-argocd-with-rbac) I described how to set up GitOps RBAC rules in a way tenants can work with their (and only their) projects. 
 
-In this article, I will try to demonstrate a possibility to deploy per customer and per cluster:
+In this article, I will try to demonstrate a possibility to deploy per tenant and per cluster:
 
 - Namespace(s) including labels
 - Local project admin group (in case groups are not managed otherwise, like LDAP Group Sync)
@@ -25,7 +25,7 @@ The idea here is to fully automate the creation of Kubernetes objects, by simply
 
 Each Kubernetes object can be enabled or disabled, to provide more flexibility. For example, if you do not want to work with Limit Ranges, you can disable (or completely remove the whole yaml block) and they will not be created. Same for any other object. 
 
-Like in my previous article, the **Argo CD AppProject** object is used to limit a customer/project accordingly. 
+Like in my previous article, the **Argo CD AppProject** object is used to limit a tenant/project accordingly. 
 
 I will be using a [Helm Chart](https://github.com/tjungbauer/helm-charts/tree/main/charts/helper-proj-onboarding) to create any object that is required. The reasons why I prefer Helm templating are:
 
@@ -55,7 +55,7 @@ I would like to demonstrate the following use case:
 ## Prerequisites and assumptions
 
 1. Users on the cluster: To test everything Mona and Peter must be able to authenticate. I used simple htpasswd authentication on my cluster. 
-2. 2nd Argo CD instance (application scoped GitOps instance): To deploy customer workload onto the cluster the main openshift-gitops instance should NOT be used. Instead, an application scoped GitOps instance should be created at least.  
+2. 2nd Argo CD instance (application scoped GitOps instance): To deploy a tenant workload onto the cluster the main openshift-gitops instance should NOT be used. Instead, an application scoped GitOps instance should be created at least.  
 3. Example application: https://github.com/tjungbauer/book-import/
 4. Developers must know and follow gitops approach. This is a process thing and common practice. **If it is not in Git, it does not exist**
 
@@ -74,7 +74,7 @@ ApplicationSets are used to create multiple Argo CD Applications automatically, 
 The folder structure looks like the following: 
 
 ```bash
-▶├──customer-projects
+▶├──tenant-projects
  │  ├──my-main-app
  │  │  └──cluster-local
  │  │    └──values.yaml
@@ -84,10 +84,10 @@ The folder structure looks like the following:
  │  └──values-global.yaml
 ```
 
-Any customer is a separate folder and any customer can have one or more Namespaces (Projects). I am using the name of the application as separator, for example **my-main-app**. Below the application folder a folder for each cluster is created to distinguish the configuration for different clusters, for example **cluster-local**. Finally, in this folder a quite large **values.yaml** can be found that defines everything that is required for the project onboarding. 
+Any tenant is a separate folder and any tenant can have one or more Namespaces (Projects). I am using the name of the application as separator, for example **my-main-app**. Below the application folder a folder for each cluster is created to distinguish the configuration for different clusters, for example **cluster-local**. Finally, in this folder a quite large **values.yaml** can be found that defines everything that is required for the project onboarding. 
 
-The following ApplicationSet uses the files in **customer-projects/******/values.yaml** to fetch the parameters. 
-It generates an Application named "<customer-name>-<path-name>" and uses the Helm Chart [Project Onboarding](https://github.com/tjungbauer/openshift-cluster-bootstrap/tree/main/clusters/all/project-onboarding) as source, providing two values-files:
+The following ApplicationSet uses the files in **tenant-projects/******/values.yaml** to fetch the parameters. 
+It generates an Application named "<tenant-name>-<path-name>" and uses the Helm Chart [Project Onboarding](https://github.com/tjungbauer/openshift-cluster-bootstrap/tree/main/clusters/all/project-onboarding) as source, providing two values-files:
 
 - **values-global.yaml**: defines global values, currently the Namespace of the an application scoped GitOps instance and a list of environments.
 - the **values.yaml** of the appropriate folder.
@@ -96,7 +96,7 @@ It generates an Application named "<customer-name>-<path-name>" and uses the Hel
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
-  name: onboarding-customer-workload
+  name: onboarding-tenant-workload
   namespace: openshift-gitops
 spec:
   syncPolicy:
@@ -104,12 +104,12 @@ spec:
   generators:
     - git:
         files:
-          - path: customer-projects/**/values.yaml # <2>
+          - path: tenant-projects/**/values.yaml # <2>
         repoURL: 'https://github.com/tjungbauer/openshift-cluster-bootstrap'
         revision: main
   template:
     metadata:
-      name: '{{ customer.normalized }}-{{ path.basename }}' # <3>
+      name: '{{ tenant.normalized }}-{{ path.basename }}' # <3>
     spec:
       info:
         - name: Description
@@ -122,15 +122,15 @@ spec:
         helm:
           valueFiles: #<5>
             - '/{{ path }}/values.yaml'
-            - /customer-projects/values-global.yaml
+            - /tenant-projects/values-global.yaml
         path: clusters/all/project-onboarding
         repoURL: 'https://github.com/tjungbauer/openshift-cluster-bootstrap' # <6>
         targetRevision: main
 ```
 **<1>** Applications, created by this ApplicationSet, shall remain even if the ApplicationSet gets deleted. \
 **<2>** The path that shall be observed by this ApplicationSet. ** will return all files and directories recursively \
-**<3>** The name that shall be used to generate an Application. The parameter **customer.normalized** is coming from the values-file the cluster-admin has generated. \
-**<4>** The target cluster to which the customer workflow shall be deployed. This setting is coming from the values-file. \
+**<3>** The name that shall be used to generate an Application. The parameter **tenant.normalized** is coming from the values-file the cluster-admin has generated. \
+**<4>** The target cluster to which the tenant workflow shall be deployed. This setting is coming from the values-file. \
 **<5>** A list of values files, that shall be used. \
 **<6>** The repo URL and path which shall be read.
 
@@ -159,11 +159,11 @@ global:
 
 The individual values files are separated by:
 
-1. The customers/projects
+1. The tenants/projects
 2. The clusters
 
 This file defines everything that is required for project onboarding. The example file is quite huge, and probably not everything is required for any onboarding. 
-A full example can be found in my GitHub repository: [values.yaml](https://github.com/tjungbauer/openshift-cluster-bootstrap/blob/main/customer-projects/my-main-app/cluster-local/values.yaml)
+A full example can be found in my GitHub repository: [values.yaml](https://github.com/tjungbauer/openshift-cluster-bootstrap/blob/main/tenant-projects/my-main-app/cluster-local/values.yaml)
 
 ### Basic parameters
 
@@ -171,8 +171,8 @@ The basic parameters define settings that are either used by the ApplicationSet 
 
 The following settings are currently used: 
 
-1. **customer.name**: The name of the customer
-2. **customer.normalized**: Argo CD requires normalized names (lower case and -). Since there is currently no way to automatically normalize the customer.name in the ApplicationSet, I decided to create a 2nd parameter.
+1. **tenant.name**: The name of the tenant
+2. **tenant.normalized**: Argo CD requires normalized names (lower case and -). Since there is currently no way to automatically normalize the tenant.name in the ApplicationSet, I decided to create a 2nd parameter.
 3. **oidc_groups**: Name of the group that is allowed to work with the Argo CD project. This group might be created by the Helm Chart or must be known (i.e. is automatically synchronized)
 4. **environment**: Defines the name of the cluster as known in Argo CD. **in-cluster** is the default (local) cluster that Argo CD will create. 
 5. **environment-cluster-api**: API of the cluster. 
@@ -181,11 +181,11 @@ The following settings are currently used:
 
 ```yaml
 # Name of the custoemr or project. This must be the path.basename.
-customer.name: my-main-app
+tenant.name: my-main-app
 
-# Normalized name of the customer or project. This must be LOWER case, otherwise Argo CD will fail
+# Normalized name of the tenant or project. This must be LOWER case, otherwise Argo CD will fail
 # This will be part the name the Argo CD ApplicationSet will use to create the Application.
-customer.normalized: my-main-app # name for ArgoCD must be in lower case
+tenant.normalized: my-main-app # name for ArgoCD must be in lower case
 
 # Group that is allowed in RBAC. This group can either be created using this Helm Chart (will be named as <namespace>-admin) or must be known (for example synced via LDAP Group Sync)
 oidc_groups: &oidc-group my-main-app-project-1-admins
@@ -199,7 +199,7 @@ environment-cluster-api: &environment-api https://kubernetes.default.svc
 
 ### Parameters passed to helper-proj-onboarding
 
-Most parameters are handed over to the Chart **[helper-proj-onboarding](https://github.com/tjungbauer/openshift-cluster-bootstrap/blob/main/customer-projects/my-main-app/cluster-local/values.yaml)**. This is indicated by:
+Most parameters are handed over to the Chart **[helper-proj-onboarding](https://github.com/tjungbauer/openshift-cluster-bootstrap/blob/main/tenant-projects/my-main-app/cluster-local/values.yaml)**. This is indicated by:
 
 ```yaml
 # Parameters handed over to Sub-Chart helper-proj-onboarding
@@ -210,14 +210,14 @@ All parameters below are used by the Sub Chart.
 
 #### Namespaces
 
-One or more Namespaces can be created for a customer. It defines a _name_, _additional_settings_ (additional labels) and _customer labels_. 
+One or more Namespaces can be created for a tenant. It defines a _name_, _additional_settings_ (additional labels) and _tenant labels_. 
 As any object a Namespace can be enabled or disabled. Be aware that simply disabling a Namespace does not mean that GitOps will automatically delete all objects, (not with the syncOptions that the ApplicationSet defines). In case a project shall be decomissioned the **prune** option must be selected during the Sync.
 
 The defines the block, that might be used to create a new Namespace object:
 
 ```yaml
-  # List of namespaces this customer shall manage.
-  # A customer or project may consist of multiple namespace
+  # List of namespaces this tenant shall manage.
+  # A tenant or project may consist of multiple namespace
   namespaces:
 
     # Name of the first Namespace
@@ -277,7 +277,7 @@ The RoleBinding will use the role **admin** per default. In case you are using y
 
 #### Argo CD RBAC
 
-Projects inside Argo CD (not to be confused with Kubernetes Projects) help you to logically group applications together. In our example I create an Argo CD project for every Namespace a customer manages. This will allow that Mona or Peter can manage the Application via Argo CD. Such objects are defined by the **AppProject** object which is documented in the [Argo CD documentation](https://argo-cd.readthedocs.io/en/stable/user-guide/projects/)
+Projects inside Argo CD (not to be confused with Kubernetes Projects) help you to logically group applications together. In our example I create an Argo CD project for every Namespace a tenant manages. This will allow that Mona or Peter can manage the Application via Argo CD. Such objects are defined by the **AppProject** object which is documented in the [Argo CD documentation](https://argo-cd.readthedocs.io/en/stable/user-guide/projects/)
 
 These projects allow to
 - restrict allowed sources (i.e., Git repositories)
@@ -291,12 +291,12 @@ The example defines the following, huge block. All parameters should be set here
 ```yaml
       # Creation of Argo CD Project
       argocd_rbac_setup:
-        # This is required to build the rbac rules correctly. Theoretically, you can create multiple RBAC rules, but usually you create one per project/customer
+        # This is required to build the rbac rules correctly. Theoretically, you can create multiple RBAC rules, but usually you create one per project/tenant
         argocd_project_1:
           enabled: true # <1>
-          # Name of the AppProject is set to the customers Namespace. Which means, each Namespace will get it's own AppProject
+          # Name of the AppProject is set to the tenants Namespace. Which means, each Namespace will get it's own AppProject
           name: *name # <2>
-          # List of allowed repositories. If the customer tries to use a different repo, Argo CD will deny it. * can be used to allow all.
+          # List of allowed repositories. If the tenant tries to use a different repo, Argo CD will deny it. * can be used to allow all.
           sourceRepos: # <4>
             - 'https://github.com/tjungbauer/book-import/'
           rbac: # <5>
@@ -553,7 +553,7 @@ Mona and Peter requested the new Namespaces **my-main-app-project-1** and **my-m
 
 The administrator of the cluster created a new folder and a values-file that define all required parameters. 
 
-**NOTE** A full example can be found in my GitHub repository: [values.yaml](https://github.com/tjungbauer/openshift-cluster-bootstrap/blob/main/customer-projects/my-main-app/cluster-local/values.yaml)
+**NOTE** A full example can be found in my GitHub repository: [values.yaml](https://github.com/tjungbauer/openshift-cluster-bootstrap/blob/main/tenant-projects/my-main-app/cluster-local/values.yaml)
 
 The ApplicationSet will automatically fetch the new folder and create the Application inside Argo CD. 
 
