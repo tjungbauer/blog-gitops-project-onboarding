@@ -27,27 +27,35 @@ Each Kubernetes object can be enabled or disabled, to provide more flexibility. 
 
 Like in my previous article, the **Argo CD AppProject** object is used to limit a customer/project accordingly. 
 
-I will be using a [Helm Chart](https://github.com/tjungbauer/helm-charts/tree/main/charts/helper-proj-onboarding) to create any object that is required, simply because I prefer Helm. Of course, other options can be used too, this is fully up to you.
+I will be using a [Helm Chart](https://github.com/tjungbauer/helm-charts/tree/main/charts/helper-proj-onboarding) to create any object that is required. The reasons why I prefer Helm templating are:
+
+- better repeatability 
+- allows creating easy configuration for most important items (disable/enable objects)
+- allows to create more complex configuration if needed (disable/enable objects)
+- templating work better than patching in this case, since you do not need to deal with hundreds of overlays or patching configuration, but simply create a values-file and defining everything there. 
+
+Still, other options like Kustomize can be used to achieve the same goal. At the end, it is up to you what you prefer. 
 
 ## Use Case
 
 I would like to demonstrate the following use case:
 
-- We have two applications, called: **my-main-app** (contains two namespaces) and **my-second-app** that should be onboarded onto the cluster.
+- We have two applications, called: **my-main-app** and **my-second-app** that should be onboarded onto the cluster.
+- **my-main-app** is using two Namespaces **my-main-app-project-1** and **my-main-app-project-2**. Maybe Mona uses this for frontnet and backend parts of the application.
 - **Mona** is admin for both applications.
 - **Peter** can managed only **my-main-app**.
 - Mona and Peter request new projects (multiple) for the cluster which will be prepared by the cluster-admin who will create a new folder and generate a values-file (Helm) for that project and the target cluster.
 - The cluster-admin synchronizes the project onboarding application in GitOps, which will create all required objects. (Namespace, ResourceQuota, Network Policies etc.)
-- Mona and Peter can then use GitOps (a 2nd instance) to deploy their application accordingly using the allowed namespace, repositories etc. (limited by GitOps RBAC rules).
+- Mona and Peter can then use an application scoped GitOps instance (a 2nd instance) to deploy their application accordingly using the allowed namespace, repositories etc. (limited by GitOps RBAC rules).
 
-**CAUTION**: When you install openshift-gitops (Argo CD) an instance with a wide range of privileges is created. This instance should not be used by developers to onboard their applications. Instead, a 2nd instance should be created at least. 
+**CAUTION**: When you install openshift-gitops (Argo CD) a centralized cluster scoped GitOps instance with a wide range of privileges is created. This instance should not be used by developers to onboard their applications. Instead, an application scoped GitOps instance should be created at least. 
 
 **NOTE**: To make it easier for me, I am working with one cluster only. But different clusters can be used, all managed by a central GitOps instance.
 
 ## Prerequisites and assumptions
 
 1. Users on the cluster: To test everything Mona and Peter must be able to authenticate. I used simple htpasswd authentication on my cluster. 
-2. 2nd Argo CD instance: To deploy customer workload onto the cluster the main openshift-gitops instance should NOT be used. Instead, a 2nd instance should be created at least.  
+2. 2nd Argo CD instance (application scoped GitOps instance): To deploy customer workload onto the cluster the main openshift-gitops instance should NOT be used. Instead, an application scoped GitOps instance should be created at least.  
 3. Example application: https://github.com/tjungbauer/book-import/
 4. Developers must know and follow gitops approach. This is a process thing and common practice. **If it is not in Git, it does not exist**
 
@@ -56,6 +64,8 @@ I would like to demonstrate the following use case:
 The following diagram depicts the relationship between the different objects and GitOps instances. 
 
 ![Correlation](images/correlation-diagram.png)
+
+**NOTE**: The cluster-admins (platform team) have the responsibility of all the objects that are created here. Mona and Peter can then log into the application scoped GitOps instance (2nd Argo CD instance) and create and sync their Applications. 
 
 ## Directory Structure
 
@@ -77,9 +87,9 @@ The folder structure looks like the following:
 Any customer is a separate folder and any customer can have one or more Namespaces (Projects). I am using the name of the application as separator, for example **my-main-app**. Below the application folder a folder for each cluster is created to distinguish the configuration for different clusters, for example **cluster-local**. Finally, in this folder a quite large **values.yaml** can be found that defines everything that is required for the project onboarding. 
 
 The following ApplicationSet uses the files in **customer-projects/******/values.yaml** to fetch the parameters. 
-It generates an Application named "<customer-name>-<path-name>" and uses the Helm Chart [Project Onboarding](https://github.com/tjungbauer/openshift-cluster-bootstrap/clusters/all/project-onboarding) as source, providing two values-files:
+It generates an Application named "<customer-name>-<path-name>" and uses the Helm Chart [Project Onboarding](https://github.com/tjungbauer/openshift-cluster-bootstrap/tree/main/clusters/all/project-onboarding) as source, providing two values-files:
 
-- **values-global.yaml**: defines global values, currently the Namespace of the 2nd Argo CD instance only.
+- **values-global.yaml**: defines global values, currently the Namespace of the an application scoped GitOps instance and a list of environments.
 - the **values.yaml** of the appropriate folder.
 
 ```yaml
@@ -118,7 +128,7 @@ spec:
         targetRevision: main
 ```
 **<1>** Applications, created by this ApplicationSet, shall remain even if the ApplicationSet gets deleted. \
-**<2>** The path that shall be observed by this ApplicationSet \
+**<2>** The path that shall be observed by this ApplicationSet. ** will return all files and directories recursively \
 **<3>** The name that shall be used to generate an Application. The parameter **customer.normalized** is coming from the values-file the cluster-admin has generated. \
 **<4>** The target cluster to which the customer workflow shall be deployed. This setting is coming from the values-file. \
 **<5>** A list of values files, that shall be used. \
@@ -128,13 +138,22 @@ The Helm Chart found at **clusters/all/project-onboarding** is only a wrapper, t
 
 ## Values File: values-global.yaml 
 
-This values-file defines global parameters. Currently, it is only used to define the Namespace of the second GitOps/Argo CD instance, that can be used for all customers. 
-
+This values-file defines global parameters. 
 ```yaml
 global:
-  # Namespace of 2nd ArgoCD instance, that is responsible to deploy workload onto the clusters
-  application_gitops_namespace: gitops-application
+  # Namespace of application scoped GitOps instance, that is responsible to deploy workload onto the clusters
+  application_gitops_namespace: gitops-application # <1>
+
+  # cluster environments. A list of clusters that are known in Argo CD
+  # name and url must be equal to what is defined in Argo CD
+  envs: # <2>
+    - name: in-cluster
+      url: https://kubernetes.default.svc
+    - name: prod-cluster
+      url: https://production.cluster
 ```
+**<1>** The name of the 2nd Argo CD instance (the application scoped GitOps instance)
+**<2>** The list of clusters as known in Argo CD. 
 
 ## Values File: values.yaml 
 
@@ -192,7 +211,7 @@ All parameters below are used by the Sub Chart.
 #### Namespaces
 
 One or more Namespaces can be created for a customer. It defines a _name_, _additional_settings_ (additional labels) and _customer labels_. 
-As any object a Namespace can be enabled or disabled. Be aware that simply disabling a Namespace does not mean that GitOps will automatically delete all objects, (not with the syncOptions that the ApplicationSet defines). In case a project shall be deboarded the **prune** option must be selected during the Sync.
+As any object a Namespace can be enabled or disabled. Be aware that simply disabling a Namespace does not mean that GitOps will automatically delete all objects, (not with the syncOptions that the ApplicationSet defines). In case a project shall be decomissioned the **prune** option must be selected during the Sync.
 
 The defines the block, that might be used to create a new Namespace object:
 
@@ -252,7 +271,7 @@ The RoleBinding will use the role **admin** per default. In case you are using y
           - mona
           - peter
 ```
-**<1>** Optional: name of the group. If not set it will be automatically generated based on the Namespace name \ 
+**<1>** Optional: name of the group. If not set it will be automatically generated based on the Namespace name \
 **<2>** Optional: Name of the ClusterRole. If not set it will automatically use **admin** \
 **<3>** List of users assigned to the group. If not set a RoleBinding will be generated only. 
 
@@ -277,10 +296,6 @@ The example defines the following, huge block. All parameters should be set here
           enabled: true # <1>
           # Name of the AppProject is set to the customers Namespace. Which means, each Namespace will get it's own AppProject
           name: *name # <2>
-          # Destination clusters. They are defined above. Since we split the values file per environment (cluster) here usually one cluster should be listed. * can be used to allow all.
-          destinations: # <3>
-            - name: *environment
-              server: *environment-api
           # List of allowed repositories. If the customer tries to use a different repo, Argo CD will deny it. * can be used to allow all.
           sourceRepos: # <4>
             - 'https://github.com/tjungbauer/book-import/'
@@ -330,12 +345,11 @@ The example defines the following, huge block. All parameters should be set here
 ```
 **<1>** Enabled true/false \
 **<2>** Name of the AppProject object, for better cross-reference I am using the name of the namespace here. \
-**<3>** Destination clusters (name and API). Basically, a list of destinations could be defined here, but since we separate the values-files per cluster, only one target will be used here. \
-**<4>** List of allowed source repositories \
-**<5>** List of RBAC rules with name and description. While it is possible to create multiple rules, I usually work with one definition per Namespace. However, when you have multiple groups with a fine granular permission matrix, you might need to define more. \ 
-**<6>** List of OpenShift Groups that are allowed for this project. The group name must be known or is generated by the Helm chart. \
-**<7>** Policies, containing the parameters: action (get, create, update, delete, sync or override), permissions (deny, allow), resources (i.e. applications (==default value)) and object (default = *) \
-**<8>** Definition of sync windows (timeframe when synchronization is allowed or disallowed). It defines the application, environment, namespace, as well as a timezone a timeframe and if a manual synchronization is allowed or not.  
+**<3>** List of allowed source repositories \
+**<4>** List of RBAC rules with name and description. While it is possible to create multiple rules, I usually work with one definition per Namespace. However, when you have multiple groups with a fine granular permission matrix, you might need to define more. \
+**<5>** List of OpenShift Groups that are allowed for this project. The group name must be known or is generated by the Helm chart. \
+**<6>** Policies, containing the parameters: action (get, create, update, delete, sync or override), permissions (deny, allow), resources (i.e. applications (==default value)) and object (default = *) \
+**<7>** Definition of sync windows (timeframe when synchronization is allowed or disallowed). It defines the application, environment, namespace, as well as a timezone a timeframe and if a manual synchronization is allowed or not.  
 
 #### ResourceQuota
 
@@ -419,8 +433,8 @@ However, this is sometimes not the case. If you want to set a LimitRange you can
           max:
             storage: 20Gi
 ```
-**<1>** LimitRanges for Pods. 
-**<2>** LimitRanges for Containers
+**<1>** LimitRanges for Pods. \
+**<2>** LimitRanges for Containers \
 **<3>** LimitRanges for PVCs
 
 Like for ResourceQuotas only defined settings will be created. If, for example, nothing is set for pod.max.cpu then this value will be ignored. 
@@ -547,7 +561,7 @@ GitOps uses the Helm Chart and would like to create all requested objects.
 
 ![Argo CD Onboarding](images/onboarding.png)
 
-Once synchronised, Mona can log into the 2nd Argo CD instance and create the Applications she requires and sync here workload onto the cluster. She is limited by the AppProject and can only use the allowed Namespaces, clusters, repositories etc.
+Once synchronised, Mona can log into the application scoped GitOps instance and create the Applications she requires and sync here workload onto the cluster. She is limited by the AppProject and can only use the allowed Namespaces, clusters, repositories etc.
 
 ![Mona's Applications](images/mona-app.png)
 
