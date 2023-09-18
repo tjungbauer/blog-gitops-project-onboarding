@@ -25,6 +25,8 @@ The idea here is to fully automate the creation of Kubernetes objects, by simply
 
 Each Kubernetes object can be enabled or disabled, to provide more flexibility. For example, if you do not want to work with Limit Ranges, you can disable (or completely remove the whole yaml block) and they will not be created. Same for any other object. 
 
+**CAUTION**: The configuration of a values-files looks and can be quite confusing. Therefore, I have create something I called project T-Shirt size as well (see below). Here the T-Shirts are defined in the global-values-file. Still settings can be overwritten per project if required. 
+
 Like in my previous article, the **Argo CD AppProject** object is used to limit a tenant/project accordingly. 
 
 I will be using a [Helm Chart](https://github.com/tjungbauer/helm-charts/tree/main/charts/helper-proj-onboarding) to create any object that is required. The reasons why I prefer Helm templating are:
@@ -99,46 +101,48 @@ metadata:
   name: onboarding-tenant-workload
   namespace: openshift-gitops
 spec:
+  goTemplate: true # <1>
   syncPolicy:
-    preserveResourcesOnDeletion: true # <1>
+    preserveResourcesOnDeletion: true # <2>
   generators:
     - git:
         files:
-          - path: tenant-projects/**/values.yaml # <2>
+          - path: tenant-projects/**/values.yaml # <3>
         repoURL: 'https://github.com/tjungbauer/openshift-cluster-bootstrap'
         revision: main
   template:
     metadata:
-      name: '{{ tenant.normalized }}-{{ path.basename }}' # <3>
+      name: '{{ index .path.segments 1 | normalize }}-{{ .path.basename }}' # <4>
     spec:
       info:
         - name: Description
           value: Onboarding Workload to the cluster
       destination:
         namespace: default
-        name: '{{ environment }}' # <4>
+        name: '{{ .environment }}' # <5>
       project: default
       source:
         helm:
-          valueFiles: #<5>
-            - '/{{ path }}/values.yaml'
+          valueFiles: # <6>
+            - '/{{ .path.path }}/values.yaml'
             - /tenant-projects/values-global.yaml
         path: clusters/all/project-onboarding
-        repoURL: 'https://github.com/tjungbauer/openshift-cluster-bootstrap' # <6>
+        repoURL: 'https://github.com/tjungbauer/openshift-cluster-bootstrap' # <7>
         targetRevision: main
 ```
-**<1>** Applications, created by this ApplicationSet, shall remain even if the ApplicationSet gets deleted. \
-**<2>** The path that shall be observed by this ApplicationSet. ** will return all files and directories recursively \
-**<3>** The name that shall be used to generate an Application. The parameter **tenant.normalized** is coming from the values-file the cluster-admin has generated. \
-**<4>** The target cluster to which the tenant workflow shall be deployed. This setting is coming from the values-file. \
-**<5>** A list of values files, that shall be used. \
-**<6>** The repo URL and path which shall be read.
+**<1>** go template is set to true, to enable functions like "normalize" 
+**<2>** Applications, created by this ApplicationSet, shall remain even if the ApplicationSet gets deleted. \
+**<3>** The path that shall be observed by this ApplicationSet. ** will return all files and directories recursively \
+**<4>** The name that shall be used to generate an Application. The parameter generated out of the folder-name (==app name) and the basename (clustername) \
+**<5>** The target cluster to which the tenant workflow shall be deployed. This setting is coming from the values-file. \
+**<6>** A list of values files, that shall be used. \
+**<7>** The repo URL and path which shall be read.
 
 The Helm Chart found at **clusters/all/project-onboarding** is only a wrapper, that will use the actual Helm Chart [helper-proj-onboarding](https://github.com/tjungbauer/helm-charts/tree/main/charts/helper-proj-onboarding) as a dependency. Here all the magic happens. The wrapper chart is used only to let the ApplicationSet search the GitHub repository and find all the required values-files, which I did not want to attach directly to actual Helm Chart.
 
 ## Values File: values-global.yaml 
 
-This values-file defines global parameters. 
+This values-file defines global parameters. The following are the minimum that shall be defined in this file:
 ```yaml
 global:
   # Namespace of application scoped GitOps instance, that is responsible to deploy workload onto the clusters
@@ -171,22 +175,13 @@ The basic parameters define settings that are either used by the ApplicationSet 
 
 The following settings are currently used: 
 
-1. **tenant.name**: The name of the tenant
-2. **tenant.normalized**: Argo CD requires normalized names (lower case and -). Since there is currently no way to automatically normalize the tenant.name in the ApplicationSet, I decided to create a 2nd parameter.
-3. **oidc_groups**: Name of the group that is allowed to work with the Argo CD project. This group might be created by the Helm Chart or must be known (i.e. is automatically synchronized)
-4. **environment**: Defines the name of the cluster as known in Argo CD. **in-cluster** is the default (local) cluster that Argo CD will create. 
-5. **environment-cluster-api**: API of the cluster. 
+1. **oidc_groups**: Name of the group that is allowed to work with the Argo CD project. This group might be created by the Helm Chart or must be known (i.e. is automatically synchronized)
+2. **environment**: Defines the name of the cluster as known in Argo CD. **in-cluster** is the default (local) cluster that Argo CD will create. 
+3. **environment-cluster-api**: API of the cluster. 
 
 **NOTE**: **environment** and **environment-cluster-api** are defined in each values.yaml. Here, you define only one cluster since the values files are separated by cluster. There might be a better (global?) way to define them. 
 
 ```yaml
-# Name of the custoemr or project. This must be the path.basename.
-tenant.name: my-main-app
-
-# Normalized name of the tenant or project. This must be LOWER case, otherwise Argo CD will fail
-# This will be part the name the Argo CD ApplicationSet will use to create the Application.
-tenant.normalized: my-main-app # name for ArgoCD must be in lower case
-
 # Group that is allowed in RBAC. This group can either be created using this Helm Chart (will be named as <namespace>-admin) or must be known (for example synced via LDAP Group Sync)
 oidc_groups: &oidc-group my-main-app-project-1-admins
 
@@ -565,6 +560,187 @@ Once synchronised, Mona can log into the application scoped GitOps instance and 
 
 ![Mona's Applications](images/mona-app.png)
 
+## But isn't this quite complex? 
+
+Yes, defining everything in one file can be quite complex. The generation of this file can be automated with Ansible for example. Moreover, not everything must be used. For example, if you do not want to work with Quota or LimitRanges, just disable them or remove the block in the values-file. However, there is another method ->
+
+## Project T-Shirt Sizes
+
+While working on this article and collecting some feedback, a discussion about the possibility to simply define T-Shirt sizes for a project was started. Wouldn't it be good to simply define T-Shirt sizes with default settings and then use these definitions to create a new tenant. Still, the possibility to change settings for specific project should be allowed. 
+
+I added this feature and the configurations for each project is now simplified: 
+
+### Values File: values-global.yaml with T-Shirt sized projects
+
+The first change was done in the global values-files. The global settings **allowed_source_repos** and **tshirt_sizes** have been added. It now looks like the following: 
+
+```yaml
+---
+
+global:
+  # Namespace of application scoped GitOps instance, that is responsible to deploy workload onto the clusters
+  application_gitops_namespace: gitops-application
+
+  # cluster environments. A list of clusters that are known in Argo CD
+  # name and url must be equal to what is defined in Argo CD
+  envs:
+    - name: in-cluster
+      url: https://kubernetes.default.svc
+    - name: prod-cluster
+      url: https://production.cluster
+
+  # Repositories projects are allowed to use. These are configured on a global level and used if not specified in a _T-Shirt_ project. 
+  # Can be overwritten for projects in their specific values-file
+  allowed_source_repos: # <1>
+    - "https://myrepo"
+    - "https://the-second-repo"
+
+  tshirt_sizes: # <2>
+    - name: XL
+      quota:
+        pods: 100
+        limits:
+          cpu: 4
+          memory: 4Gi
+        requests:
+          cpu: 1
+          memory: 2Gi     
+    - name: L
+      quota:
+        limits:
+          cpu: 2
+          memory: 2Gi
+        requests:
+          cpu: 1
+          memory: 1Gi 
+    - name: S
+      quota: # <3>
+        limits:
+          cpu: 1
+          memory: 1Gi
+        requests:
+          cpu: 500m
+          memory: 1Gi
+      limitRanges: # <4>
+        container:
+          default:
+            cpu: 1
+            memory: 4Gi
+          defaultRequest:
+            cpu: 1
+            memory: 2Gi
+```
+**<1>** Repositories that are allowed inside the AppProject. Can be overwritten for individual projects. \
+**<2>** T-Shirt sizes for projects. Currently defined: XL, L, S \
+**<3>** Default Quota settings for the S-Size \
+**<4>** Default LimitRanges for the S-Size
+
+### Values File: values.yaml with T-Shirt sized projects
+
+Like the global values-file the values-file for the individual project on the specific cluster is slightly changed.
+
+It can now define the parameter **project_size** which must be one of the sizes defined in the global values-file. LimitRanges, ResourceQuota and the list of allowed repositories that are set here, will overwrite the default settings (Only the values that are set here, will be used to overwrite the defaults.) The management of NetworkPolicies (default or custom) stays the same. For the Argo CD RBAC definition default values are used, but still it would be possible to define the whole block are described above here (but we want to keep it simple) 
+
+```yaml
+# Group that is allowed in RBAC. This group can either be created using this Helm Chart (will be named as <namespace>-admin) or must be known (for example synced via LDAP Group Sync)
+oidc_groups: &oidc-group my-tshirt-size-app-admins
+
+# Environment to which these values are valid, this should be the cluster name as defined in the values-global.yaml
+# In best case the same is equal to the folder we are currntly in, but this is optional.
+environment: &environment in-cluster
+
+# Parameters handed over to Sub-Chart helper-proj-onboarding
+helper-proj-onboarding:
+
+  environment: *environment
+
+  # List of namespaces this tenant shall manage.
+  # A tenant or project may consist of multiple namespace
+  namespaces:
+
+    # Name of the first Namespace
+    - name: &name my-tshirt-size-app
+
+      # Is this Namespace enabled or not
+      enabled: true
+
+      project_size: "S"  # <1>
+
+      # Override specific quota settings individually
+      resourceQuotas: # <2>
+        limits:
+          cpu: 10
+
+      local_admin_group: # <3>
+        enabled: true
+        # group_name: my_group_name
+        # optional parameter, default would be "admin"
+        clusterrole: admin
+        # List of users
+        users:
+          - mona
+          - peter
+
+      # Allowed repositories for this project, overwrites the default settings. 
+      # allowed_source_repos: # <4>
+      #  - "https://my-personal-repo"
+      #  - "https://my-second-personal-repo"
+
+      # Network Policies ... these are a bit more complex, when you want to keep them fully configurable.
+      # Maybe the following is too much to manage, anyway, let's start
+
+      # 5 default network policies will be created everytime, unless you overwrite them here
+      # You can remove this whole block to have the policies created or you can select specific policies
+      # which shall be disabled.
+      # The 5 policies are:
+      #    - Allow Ingress traffic from the OpenShift Router
+      #    - Allow OpenShift Monitoring to access and fetch metrics
+      #    - Allow inner namespace communication (pod to pod of the same Namespace)
+      #    - Allow Kube API Server
+      #    - Forbid ANY Egress traffic
+
+      # For example: I would like to disable "deny all egress" (which means the Pods can reach any external destination).
+      default_policies: # <5>
+      #  disable_allow_from_ingress: false
+      #  disable_allow_from_monitoring: false
+      #  disable_allow_from_same_namespace: false
+      #  disable_allow_kube_apiserver: false
+        disable_deny_all_egress: true  # This default policy will not be created, while the others will be.
+
+      # Overwrite LimitRanges per project
+      limitRanges: # <6>
+        enabled: true
+        container:
+          max:
+            cpu: 4
+            memory: 10Gi
+          min:
+            cpu: 1
+            memory: 100Mi
+```
+**<1>** T-Shirt size as defined in the global values-files \
+**<2>** Overwrite specific values for ResourceQuota \
+**<3>** Define Group administrator \
+**<4>** Overwrite the allowed repository list \
+**<5>** Default NetworkPolicies, that might be disabled. \
+**<6>** Overwrite specific values for LimitRanges
+
+Like the other project onboardings the ApplicationSet will automatically fetch it: 
+
+![Argo CD Onboarding T-Shirt Size](images/onboarding-tshirt.png)
+
+To use the power of labels, the actual T-Shirt size is added to the Namespace object:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+[...]
+    namespace-size: S
+  name: my-tshirt-size-app
+``````
+
 ## Summary 
 
-This concludes this article and how it is possible to onboard new projects into OpenShift using a GitOps approach. It is one option of many. I personally prefer Helm Charts over plain yaml or Kustomize. However, they will work as well. The most important part here is not the actual tool, but that all objects and any configurations are defined in Git where a GitOps agent (in our case Argo CD) can fetch them and sync them onto the cluster.
+This concludes this article and how it is possible to onboard new projects into OpenShift using a GitOps approach. It is one option of many. I personally prefer Helm Charts over plain yaml or Kustomize, simply because it can be repeated anytime. However, Kustomize or plain yaml will work as well. The most important part here is not the actual tool, but that all objects and any configurations are defined in Git where a GitOps agent (in our case Argo CD) can fetch them and sync them onto the cluster.
