@@ -156,7 +156,7 @@ global:
     - name: prod-cluster
       url: https://production.cluster
 ```
-**<1>** The name of the 2nd Argo CD instance (the application scoped GitOps instance)
+**<1>** The name of the 2nd Argo CD instance (the application scoped GitOps instance) \
 **<2>** The list of clusters as known in Argo CD. 
 
 ## Values File: values.yaml 
