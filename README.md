@@ -177,9 +177,8 @@ The following settings are currently used:
 
 1. **oidc_groups**: Name of the group that is allowed to work with the Argo CD project. This group might be created by the Helm Chart or must be known (i.e. is automatically synchronized)
 2. **environment**: Defines the name of the cluster as known in Argo CD. **in-cluster** is the default (local) cluster that Argo CD will create. 
-3. **environment-cluster-api**: API of the cluster. 
 
-**NOTE**: **environment** and **environment-cluster-api** are defined in each values.yaml. Here, you define only one cluster since the values files are separated by cluster. There might be a better (global?) way to define them. 
+**NOTE**: **environment** is defined in each values.yaml and must be one of the clusters that is defined in the values-global file. 
 
 ```yaml
 # Group that is allowed in RBAC. This group can either be created using this Helm Chart (will be named as <namespace>-admin) or must be known (for example synced via LDAP Group Sync)
@@ -188,8 +187,6 @@ oidc_groups: &oidc-group my-main-app-project-1-admins
 # Environment to which these values are valid, this should be the cluster name as visible in Argo CD
 # In best case the same is equal to the folder we are currntly in, but this is optional.
 environment: &environment in-cluster
-# URL to cluster-API
-environment-cluster-api: &environment-api https://kubernetes.default.svc
 ```
 
 ### Parameters passed to helper-proj-onboarding
