@@ -1,743 +1,92 @@
-# Project Onboarding using GitOps and Helm
+# Creating Argo CD Application Dependencies - Waves
 
 ## Introduction
 
-During the phase of OpenShift deployments at one point the question about project onboarding comes up. 
-How can new customer or tenant be onboarded, so they can deploy their own workload onto the cluster(s)? While there are different ways from a process perspective (Service Now, Jira etc.) I focus on the Kubernetes objects that must be created at the end on each cluster.
+Working with Argo CD and leveraging the GitOps approach is a great way to manage the configurations of your different clusters.
+Since ApplicationSets, it is easy to automatically create different Argo CD Application objects that are rolled out to the environments. However, sometimes it happens that 
+a service depends on other services before it can be deployed. By design, an Application is completely autonomous and does not know the status of another Application. Therefore, it will be challenging to configure Application dependencies and let Argo CD know when to start the deployment of the next service. 
 
-In [A Guide to GitOps and Argo CD with RABC](https://cloud.redhat.com/blog/a-guide-to-using-gitops-and-argocd-with-rbac) I described how to set up GitOps RBAC rules in a way tenants can work with their (and only their) projects. 
+For example, before OpenShift-Logging can be configured, the Loki Operator and a LokiStack object must have been created. You could now create a single Application object that
+is responsible for both services. The problem is however that other services depend on Loki too, like the Netobserv Operator. Bundling this into the same Application will become confusing at some point as a single Argo CD Application gets huge. 
 
-In this article, I will try to demonstrate a possibility to deploy per tenant and per cluster:
+On the other hand, if you create a 2nd Application that also tries to install the Loki Operator Argo CD will show a warning message in the UI, since an object should be managed by one Application only. 
 
-- Namespace(s) including labels
-- Local project admin group (in case groups are not managed otherwise, like LDAP Group Sync)
-- Argo CD AppProject, that limits allowed repos, clusters, permissions etc.
-- Resource Quotas for a project
-- Limit Ranges for a project
-- default Network Policies, which are:
-  - Allow traffic in same Namespace
-  - OpenShift Monitoring & API Server
-  - OpenShift Ingress
-  - Egress deny All
-- Custom Network Policies
+So how to deal with such an issue? The answer is to use **App-of-Apps** pattern, custom **resource health checks** and **Syncwaves**. 
 
-The idea here is to fully automate the creation of Kubernetes objects, by simply configuring a **Helm values-file** in a specific folder structure, that is observed by an **ApplicationSet**.
+## App-of-Apps
+The [App-of-Apps](https://argo-cd.readthedocs.io/en/stable/operator-manual/cluster-bootstrapping/) pattern was introduced to create a single Argo CD Application that manages other Argo CD Applications (One to rule them all). In other words: A single App-of-App that will manage the Applications that will further deploy Loki, Logging etc. In our example below, this will be the starting point.
 
-Each Kubernetes object can be enabled or disabled, to provide more flexibility. For example, if you do not want to work with Limit Ranges, you can disable (or completely remove the whole yaml block) and they will not be created. Same for any other object. 
+## SyncWaves
+With Syncwaves it is possible to define an order for Argo CD which will apply the managed manifests to the system. The lower the syncwave number, the earlier the object will be created. A classic example are Namespace and Deployment. It is a good thing to first deploy a Namespace before anything else:
 
-**CAUTION**: The configuration of a values-files looks and can be quite confusing. Therefore, I have create something I called project T-Shirt size as well (see below). Here the T-Shirts are defined in the global-values-file. Still settings can be overwritten per project if required. 
+- Namespace - Syncwave 0 
+- Deployment - Syncwave 1 
 
-Like in my previous article, the **Argo CD AppProject** object is used to limit a tenant/project accordingly. 
+This means that the Namespace object will be created first and only after it has been created (reported a healthy status to Argo CD) Argo CD will create the Deployment object. 
 
-I will be using a [Helm Chart](https://github.com/tjungbauer/helm-charts/tree/main/charts/helper-proj-onboarding) to create any object that is required. The reasons why I prefer Helm templating are:
+## Combining App-of-Apps and Syncwaves
+In the following example, I will create an App-of-Apps that will take care of three other Applications that all have a Syncwave configured accordingly. The App-of-Apps will roll out the changes in "**Waves**". I created three waves are a demonstration:
 
-- better repeatability 
-- allows creating easy configuration for most important items (disable/enable objects)
-- allows to create more complex configuration if needed (disable/enable objects)
-- templating work better than patching in this case, since you do not need to deal with hundreds of overlays or patching configuration, but simply create a values-file and defining everything there. 
+- wave
+- *wave
+- *wave
 
-Still, other options like Kustomize can be used to achieve the same goal. At the end, it is up to you what you prefer. 
+The idea is to synchronize the App-of-App which will wait for the first Application before it starts with the second one and so on.
+I am calling this "waves". The App-of-Apps is starting the waves after each other. 
 
-## Use Case
+Prerequisites
+The be able for the App-of-Apps to verify the status of the managed Applications a Health Check must be configured in Argo CD. Such health check can be used to track the status of different Kubernetes objects. Only if the status "healthy" is returned for all Kubernetes manifests, Argo CD considers the whole Application as "healthy"
 
-I would like to demonstrate the following use case:
+There are some built in health check. However, for the Application object the health check has been removed in Argo CD version 1.8. You can read more about this change at https://github.com/argoproj/argo-cd/issues/3781.
+Well ... we can create a customer health check and bring this back. 
 
-- We have two applications, called: **my-main-app** and **my-second-app** that should be onboarded onto the cluster.
-- **my-main-app** is using two Namespaces **my-main-app-project-1** and **my-main-app-project-2**. Maybe Mona uses this for frontnet and backend parts of the application.
-- **Mona** is admin for both applications.
-- **Peter** can managed only **my-main-app**.
-- Mona and Peter request new projects (multiple) for the cluster which will be prepared by the cluster-admin who will create a new folder and generate a values-file (Helm) for that project and the target cluster.
-- The cluster-admin synchronizes the project onboarding application in GitOps, which will create all required objects. (Namespace, ResourceQuota, Network Policies etc.)
-- Mona and Peter can then use an application scoped GitOps instance (a 2nd instance) to deploy their application accordingly using the allowed namespace, repositories etc. (limited by GitOps RBAC rules).
+The following configuration can be added to the openshift-gitops operator
+xxxx
 
-**CAUTION**: When you install openshift-gitops (Argo CD) a centralized cluster scoped GitOps instance with a wide range of privileges is created. This instance should not be used by developers to onboard their applications. Instead, an application scoped GitOps instance should be created at least. 
+If you do not use the Operator you can add the same configuration to the Argo CD ConfigMap "argocd-cm"
 
-**NOTE**: To make it easier for me, I am working with one cluster only. But different clusters can be used, all managed by a central GitOps instance.
+The syntax of such health checks is described at https://argo-cd.readthedocs.io/en/stable/operator-manual/health/#argocd-app
+Bascially, it verifies if the status is heathy and reports this status to Argo CD.
 
-## Prerequisites and assumptions
+## Demo
+Let's create an example. 
+As described above I would like to create a "wave" that deployes the services in the following order:
 
-1. Users on the cluster: To test everything Mona and Peter must be able to authenticate. I used simple htpasswd authentication on my cluster. 
-2. 2nd Argo CD instance (application scoped GitOps instance): To deploy a tenant workload onto the cluster the main openshift-gitops instance should NOT be used. Instead, an application scoped GitOps instance should be created at least.  
-3. Example application: https://github.com/tjungbauer/book-import/
-4. Developers must know and follow gitops approach. This is a process thing and common practice. **If it is not in Git, it does not exist**
+1. Loki Operator
+2. OpenShift-Logging - creates the objects: BucketClaim, LokiStack, ClusterLogging
+3. Netobserv - creates the objects: BucketClaim, LokiStack, FlowController
 
-## Correlation
+The example can be found at my Git repository: XXXX
 
-The following diagram depicts the relationship between the different objects and GitOps instances. 
+The App-of-Apps (the controller) will manage three Applications that take care of the services. <----- direct git link>
 
-![Correlation](images/correlation-diagram.png)
+BILD XXX
 
-**NOTE**: The cluster-admins (platform team) have the responsibility of all the objects that are created here. Mona and Peter can then log into the application scoped GitOps instance (2nd Argo CD instance) and create and sync their Applications. 
+Alls we need to do is to create the App-of-Apps
 
-## Directory Structure
+YAML XXX
 
-ApplicationSets are used to create multiple Argo CD Applications automatically, based on a so-called Generator. In my case I am using the **Git Generator**, that walks through a defined folder, reads the configuration files (here Helm values-files) and uses the paramters generate the Argo CD Application.
+I did not configure it to automatically synchronize, so lets click the "Sync" button in Argo CD. 
 
-The folder structure looks like the following: 
+BILD XXX
 
-```bash
-▶├──tenant-projects
- │  ├──my-main-app
- │  │  └──cluster-local
- │  │    └──values.yaml
- │  ├──my-second-app
- │  │  └──cluster-local
- │  │    └──values.yaml
- │  └──values-global.yaml
-```
+Now our wave will start.... XXXX 
 
-Any tenant is a separate folder and any tenant can have one or more Namespaces (Projects). I am using the name of the application as separator, for example **my-main-app**. Below the application folder a folder for each cluster is created to distinguish the configuration for different clusters, for example **cluster-local**. Finally, in this folder a quite large **values.yaml** can be found that defines everything that is required for the project onboarding. 
+Only when a single wave reported a healthy status, the next wave will be started. 
+Eventuelly, all wave are finished and the whole App-of-App is healthy. 
 
-The following ApplicationSet uses the files in **tenant-projects/******/values.yaml** to fetch the parameters. 
-It generates an Application named "<tenant-name>-<path-name>" and uses the Helm Chart [Project Onboarding](https://github.com/tjungbauer/openshift-cluster-bootstrap/tree/main/clusters/all/project-onboarding) as source, providing two values-files:
+BILD XXX
 
-- **values-global.yaml**: defines global values, currently the Namespace of the an application scoped GitOps instance and a list of environments.
-- the **values.yaml** of the appropriate folder.
+What about ApplicationSets?
+Weren't ApplicationSets introduced to replice App-of-Apps pattern? Well the ApplicationSets are an evolution of the App-of-Apps patern. Unfortunately, there is one problem with ApplicationSets. Currently, it is not possible to configure Application dependencies with ApplicationSets. There is an open feature request that might deal with the in the future https://github.com/argoproj/applicationset/issues/221. 
+
+
+
+
+`
 
 ```yaml
-apiVersion: argoproj.io/v1alpha1
-kind: ApplicationSet
-metadata:
-  name: onboarding-tenant-workload
-  namespace: openshift-gitops
-spec:
-  goTemplate: true # <1>
-  syncPolicy:
-    preserveResourcesOnDeletion: true # <2>
-  generators:
-    - git:
-        files:
-          - path: tenant-projects/**/values.yaml # <3>
-        repoURL: 'https://github.com/tjungbauer/openshift-cluster-bootstrap'
-        revision: main
-  template:
-    metadata:
-      name: '{{ index .path.segments 1 | normalize }}-{{ .path.basename }}' # <4>
-    spec:
-      info:
-        - name: Description
-          value: Onboarding Workload to the cluster
-      destination:
-        namespace: default
-        name: '{{ .environment }}' # <5>
-      project: default
-      source:
-        helm:
-          valueFiles: # <6>
-            - '/{{ .path.path }}/values.yaml'
-            - /tenant-projects/values-global.yaml
-        path: clusters/all/project-onboarding
-        repoURL: 'https://github.com/tjungbauer/openshift-cluster-bootstrap' # <7>
-        targetRevision: main
-```
-**<1>** go template is set to true, to enable functions like "normalize" 
-**<2>** Applications, created by this ApplicationSet, shall remain even if the ApplicationSet gets deleted. \
-**<3>** The path that shall be observed by this ApplicationSet. ** will return all files and directories recursively \
-**<4>** The name that shall be used to generate an Application. The parameter generated out of the folder-name (==app name) and the basename (clustername) \
-**<5>** The target cluster to which the tenant workflow shall be deployed. This setting is coming from the values-file. \
-**<6>** A list of values files, that shall be used. \
-**<7>** The repo URL and path which shall be read.
-
-The Helm Chart found at **clusters/all/project-onboarding** is only a wrapper, that will use the actual Helm Chart [helper-proj-onboarding](https://github.com/tjungbauer/helm-charts/tree/main/charts/helper-proj-onboarding) as a dependency. Here all the magic happens. The wrapper chart is used only to let the ApplicationSet search the GitHub repository and find all the required values-files, which I did not want to attach directly to actual Helm Chart.
-
-## Values File: values-global.yaml 
-
-This values-file defines global parameters. The following are the minimum that shall be defined in this file:
-```yaml
-global:
-  # Namespace of application scoped GitOps instance, that is responsible to deploy workload onto the clusters
-  application_gitops_namespace: gitops-application # <1>
-
-  # cluster environments. A list of clusters that are known in Argo CD
-  # name and url must be equal to what is defined in Argo CD
-  envs: # <2>
-    - name: in-cluster
-      url: https://kubernetes.default.svc
-    - name: prod-cluster
-      url: https://production.cluster
-```
-**<1>** The name of the 2nd Argo CD instance (the application scoped GitOps instance) \
-**<2>** The list of clusters as known in Argo CD. 
-
-## Values File: values.yaml 
-
-The individual values files are separated by:
-
-1. The tenants/projects
-2. The clusters
-
-This file defines everything that is required for project onboarding. The example file is quite huge, and probably not everything is required for any onboarding. 
-A full example can be found in my GitHub repository: [values.yaml](https://github.com/tjungbauer/openshift-cluster-bootstrap/blob/main/tenant-projects/my-main-app/cluster-local/values.yaml)
-
-### Basic parameters
-
-The basic parameters define settings that are either used by the ApplicationSet or define anchors that are used multiple times or simply define values at the beginning of the file.
-
-The following settings are currently used: 
-
-1. **oidc_groups**: Name of the group that is allowed to work with the Argo CD project. This group might be created by the Helm Chart or must be known (i.e. is automatically synchronized)
-2. **environment**: Defines the name of the cluster as known in Argo CD. **in-cluster** is the default (local) cluster that Argo CD will create. 
-
-**NOTE**: **environment** is defined in each values.yaml and must be one of the clusters that is defined in the values-global file. 
-
-```yaml
-# Group that is allowed in RBAC. This group can either be created using this Helm Chart (will be named as <namespace>-admin) or must be known (for example synced via LDAP Group Sync)
-oidc_groups: &oidc-group my-main-app-project-1-admins
-
-# Environment to which these values are valid, this should be the cluster name as visible in Argo CD
-# In best case the same is equal to the folder we are currntly in, but this is optional.
-environment: &environment in-cluster
 ```
 
-### Parameters passed to helper-proj-onboarding
-
-Most parameters are handed over to the Chart **[helper-proj-onboarding](https://github.com/tjungbauer/openshift-cluster-bootstrap/blob/main/tenant-projects/my-main-app/cluster-local/values.yaml)**. This is indicated by:
-
-```yaml
-# Parameters handed over to Sub-Chart helper-proj-onboarding
-helper-proj-onboarding:
-```
-
-All parameters below are used by the Sub Chart. 
-
-#### Namespaces
-
-One or more Namespaces can be created for a tenant. It defines a _name_, _additional_settings_ (additional labels) and _tenant labels_. 
-As any object a Namespace can be enabled or disabled. Be aware that simply disabling a Namespace does not mean that GitOps will automatically delete all objects, (not with the syncOptions that the ApplicationSet defines). In case a project shall be decomissioned the **prune** option must be selected during the Sync.
-
-The defines the block, that might be used to create a new Namespace object:
-
-```yaml
-  # List of namespaces this tenant shall manage.
-  # A tenant or project may consist of multiple namespace
-  namespaces:
-
-    # Name of the first Namespace
-    - name: &name my-main-app-project-1
-
-      # Is this Namespace enabled or not
-      enabled: true
-
-      # Additional labels for Podsecurity and Monitoring for the Namespace
-      additional_settings:
-        # Pod Security Standards
-        # https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted
-        # Possible values: Privileged, Baseline, Restricted
-        # Privileged: Unrestricted policy, providing the widest possible level of permissions. This policy allows for known privilege escalations.
-        # Baseline: Minimally restrictive policy which prevents known privilege escalations. Allows the default (minimally specified) Pod configuration.
-        # Restricted: Heavily restricted policy, following current Pod hardening best practices.
-
-        # Policy violations will trigger the addition of an audit annotation to the event recorded in the audit log, but are otherwise allowed.
-        podsecurity_audit: restricted
-        # Policy violations will trigger a user-facing warning, but are otherwise allowed.
-        podsecurity_warn: restricted
-        # Policy violations will cause the pod to be rejected.
-        podsecurity_enforce: restricted
-        cluster_monitoring: true
-
-      # List of Labels that should be added to the Namespace
-      labels:
-        my_additional_label: my_label
-        another_label: another_label
-```
-
-#### Manage local Project-Admin Group
-
-It is possible to create a local Group of project admins. This can be used if there is no other mechanism in place, for example LDAP Group Sync. 
-
-In this example a local Admin Group will be generated (name <namespace name>-admins) with two users assigned to that Group.
-The RoleBinding will use the role **admin** per default. In case you are using your own Role, you can define it here.
-
-**NOTE**: You should always define a **local_admin_group** block, even if the Group object is managed by some other option. It will at least create a RoleBinding and assigns the ClusterRole to the **group_name**
-
-```yaml
-      # Create a local Group with Admin users and the required rolebinding
-      # If other systems, like LDAP Group sync is used, you will probaably not need this and can either disable it or remove the whole block.
-      local_admin_group:
-        enabled: true
-        # group_name: my_group_name # <1>
-        # optional parameter, default would be "admin"
-        clusterrole: admin # <2>
-        # List of users
-        users: # <3>
-          - mona
-          - peter
-```
-**<1>** Optional: name of the group. If not set it will be automatically generated based on the Namespace name \
-**<2>** Optional: Name of the ClusterRole. If not set it will automatically use **admin** \
-**<3>** List of users assigned to the group. If not set a RoleBinding will be generated only. 
-
-#### Argo CD RBAC
-
-Projects inside Argo CD (not to be confused with Kubernetes Projects) help you to logically group applications together. In our example I create an Argo CD project for every Namespace a tenant manages. This will allow that Mona or Peter can manage the Application via Argo CD. Such objects are defined by the **AppProject** object which is documented in the [Argo CD documentation](https://argo-cd.readthedocs.io/en/stable/user-guide/projects/)
-
-These projects allow to
-- restrict allowed sources (i.e., Git repositories)
-- restrict destination clusters and namespaces
-- restrict which objects are allowed to be deployed
-- define project roles to provide application RBAC (bound to OIDC groups and/or JWT tokens) 
-- define timeframes when Application synchronisation is allowed or not.
-
-The example defines the following, huge block. All parameters should be set here since no default values will be set for most of them.
-
-```yaml
-      # Creation of Argo CD Project
-      argocd_rbac_setup:
-        # This is required to build the rbac rules correctly. Theoretically, you can create multiple RBAC rules, but usually you create one per project/tenant
-        argocd_project_1:
-          enabled: true # <1>
-          # Name of the AppProject is set to the tenants Namespace. Which means, each Namespace will get it's own AppProject
-          name: *name # <2>
-          # List of allowed repositories. If the tenant tries to use a different repo, Argo CD will deny it. * can be used to allow all.
-          sourceRepos: # <4>
-            - 'https://github.com/tjungbauer/book-import/'
-          rbac: # <5>
-              # Name of the RBAC rule
-            - name: write
-              # Description of the RBAC rule
-              description: "Group to deploy on DEV environment"
-              # List of OCP groups that is allowed to manage objects in this project
-              oidc_groups: # <6>
-                - *oidc-group
-              # Project policies
-              # This will limit a project to specific actions
-              # Parameters:
-              #   - action: Mandatory, either get, create, update, delete, sync or override
-              #   - permissions: allow or deny (Default: deny)
-              #   - resource: i.e applications (Default: applications)
-              #   - object: Which kind of objects can be managed, default "*" (all) inside the namespace
-              policies: # <7>
-                - action: get # get, create, update, delete, sync, override
-                  permission: allow # allow or deny
-                  object: '*' # which kind of objects can be managed, default "*" (all) inside the namespace
-                - action: create
-                  permission: allow
-                - action: update
-                  permission: allow
-                - action: delete
-                  permission: allow
-                - action: sync
-                  permission: allow
-                - action: override
-                  permission: allow
-          # Sync Windows - when application can be synced or not. Typically used to prevent automatic synchronization during specific time frames
-          # but can be used to limit the allowed syncs as well.
-          syncWindows: # <8>
-            - applications:
-                - '*'
-              clusters:
-                - *environment # the cluster we care currently configuring
-              namespaces:
-                - *name # the namespace of this application
-              timezone: 'Europe/Amsterdam' # timezone, default Europe/Amsterdam
-              duration: 1h # duration, for example "30m" or "1h" (default 1h)
-              kind: allow # allow or deny (default allow)
-              manualSync: true # is manual sync allowed ot not (default true)
-              schedule: '* * * * *' # cronjob like schedule: Min, Hour, Day, Month, Weekday (default '55 0 1 12 *' )
-```
-**<1>** Enabled true/false \
-**<2>** Name of the AppProject object, for better cross-reference I am using the name of the namespace here. \
-**<3>** List of allowed source repositories \
-**<4>** List of RBAC rules with name and description. While it is possible to create multiple rules, I usually work with one definition per Namespace. However, when you have multiple groups with a fine granular permission matrix, you might need to define more. \
-**<5>** List of OpenShift Groups that are allowed for this project. The group name must be known or is generated by the Helm chart. \
-**<6>** Policies, containing the parameters: action (get, create, update, delete, sync or override), permissions (deny, allow), resources (i.e. applications (==default value)) and object (default = *) \
-**<7>** Definition of sync windows (timeframe when synchronization is allowed or disallowed). It defines the application, environment, namespace, as well as a timezone a timeframe and if a manual synchronization is allowed or not.  
-
-#### ResourceQuota
-
-A ResourceQuota object defines limits per resource for a project. It can limit the quantity of objects (i.e. maximum number of Pods) as well as the amount of compute resources that can be requests and used (i.e. cpu and memory).
-
-The following defines several settings for a ResourceQuota. Only the ones that are defined will be created. Any undefined value means that there is no quota thus no limit is configured for that specific object/compute resource. This makes sure that you define useful values for the quotas that fit into your individual environment. 
-
-**NOTE**: Only hard limits are set currently, but not scopes.
-
-```yaml
-      # Configure ResourceQuotas
-      # Here are a lot of examples, typically, you do not need all of these. cpu/memory is a good start for most use cases.
-      resourceQuotas:
-        # Enable Quotas or not. You can either disable it or remove the whole block
-        enabled: true
-        # limits of Pods, CPU, Memory, storage, secrets... etc. etc.
-        # Byte values will be replace: gi -> Gi, mi -> Mi
-        pods: 4 # <1>
-        cpu: 4
-        memory: 4Gi
-        ephemeral_storage: 4Gi
-        replicationcontrollers: 20
-        resourcequotas: 20
-        services: 100
-        secrets: 100
-        configmaps: 100
-        persistentvolumeclaims: 10
-        limits:
-          cpu: 4
-          memory: 4gi # lower case will be automatically replaced
-          ephemeral_storage: 4mi # lower case will be automatically replaced
-        requests:
-          cpu: 1
-          memory: 2Gi
-          storage: 50Gi
-          ephemeral_storage: 2Gi
-        # add here a list of your storage classes you would like to limit as well.
-        storageclasses:
-          # for example: Storageclass "bronze" has a request limit and a limit ov max. PVCs.
-          bronze.storageclass.storage.k8s.io/requests.storage: "10Gi"
-          bronze.storageclass.storage.k8s.io/persistentvolumeclaims: "10"
-```
-**<1>** List of hard limits currently supported by the Helm Chart. You only need to define the limits that you actually want to set.
-
-#### Limit Ranges
-
-A limit range can restrict the consumption of a resource inside a project. It is possible to set specific resource limits for a pod, container, image, image stream, or persistent volume claim (PVC).
-
-Currently, the Helm Chart supports Container, Pods, and PVCs. It is recommended to set LimitRanges and convince developers to set resources accordingly in their Kubernetes objects. 
-
-However, this is sometimes not the case. If you want to set a LimitRange you can define the following block in the values-file:
-
-```yaml
-      # Limit Ranges, are optional, if not set here, then default (very small ones) are used
-      limitRanges:
-        # Enable Quotas or not. You can either disable it or remove the whole block
-        enabled: true
-        pod: # <1>
-          max:
-            cpu: 4
-            memory: 4Gi
-          min:
-            cpu: 500m
-            memory: 500Mi
-        container: # <2>
-          max:
-            cpu: 4
-            memory: 4Gi
-          min:
-            cpu: 500m
-            memory: 500Mi
-          default:
-            cpu: 1
-            memory: 4Gi
-          defaultRequest:
-            cpu: 1
-            memory: 2Gi
-        pvc: # <3>
-          min:
-            storage: 1Gi
-          max:
-            storage: 20Gi
-```
-**<1>** LimitRanges for Pods. \
-**<2>** LimitRanges for Containers \
-**<3>** LimitRanges for PVCs
-
-Like for ResourceQuotas only defined settings will be created. If, for example, nothing is set for pod.max.cpu then this value will be ignored. 
-
-#### Default Network Policies
-
-**NOTE**: Per default the project admin role can modify Network Policies. This means they can change, create, or delete them. It is recommended to create a special Role in OpenShift, which does not provide this privilege, if Network Policies shall be managed at a central place and not by the project admins themselves.
-
-Network Policies limit the allowed traffic for each Namespace and are recommended to be set from the very beginning. 
-They are individual for every project, but there are some default policies that should be considered. 
-
-The 5 default policies that the Helm Chart would create, if you do not disable them are:
-
-1. **Allow Ingress traffic** from OpenShift Router (aka allow external traffic to reach your application)
-2. Allow **OpenShift Monitoring** to fetch metrics
-3. Allow **communication inside one Namespace** (pod to pod in the same Namespace)
-4. Allow **Kube-API server** to interact with the objects
-5. **Deny egress traffic** ... no egress traffic at all
-
-The Helm chart will set them automatically, unless otherwise defined in the values-file.
-
-The following example would disable the "**deny egress all**" policy, which means that egress traffic to any destination is allowed. 
-
-```yaml
-      # For example: I would like to disable "deny all egress" (which means the Pods can reach any external destination).
-      default_policies:
-        # disable_allow_from_ingress: false
-        # disable_allow_from_monitoring: false
-        # disable_allow_from_same_namespace: false
-        # disable_allow_kube_apiserver: false
-        disable_deny_all_egress: true # This default policy will not be created, while the others will be.
-```
-
-#### Additional Network Policies
-
-It is possible to define additional Network Policies using the Helm Chart. At a first look these objects look quite complex (also on the second look). However, you can define a list of policies, by simply define a Name, a podSelector and Ingress or Egress Rules, which can have a podSelector as well, or a NamespaceSelector or simply an IP-Block and define a list of protocols and ports.
-
-The example values-file defines two policies: **netpol1** and **netpol2**.
-
-**NOTE**: It is recommended to work with Network Policies from the very beginning of your Container journey. Adding them later might be very complex, because nobody knows which sources or destinations shall be allowed. 
-
-**NOTE**: Per default the project admin role can modify Network Policies. This means they can change, create, or delete them. It is recommended to create a special Role in OpenShift, which does not provide this privilege, if Network Policies shall be managed centrally.
-
-```yaml
-      # Additional custom Network Policies
-      # I created this to be able to create Policies using a Helm chart. It might look complex but it is actually quite straight forward.
-      #
-      # 1. Defaine a PodsSelect (or use all pods see example 2)
-      # 2. Define Ingress rules with selectors and ports or IP addresses
-      # 3. Optionally define egress Rules
-      networkpolicies:
-          # List of NetworkPolicies to create with name and switch if active or not
-        - name: netpol1
-          active: true
-
-          # The PodSelect based on matchLabels. Could be empty as well
-          podSelector:
-            matchLabels:
-              app: myapplication
-              app2: myapplication2
-
-          # Incoming Rules, based on Port and Selectors (Pod and Namespace)
-          ingressRules:
-            - selectors:
-                  - podSelector:
-                      matchLabels:
-                        app: myapplication
-                        version: '1.0'
-                  - namespaceSelector:
-                      matchLabels:
-                        testnamespace: "true"
-              ports:
-                - protocol: TCP
-                  port: 443
-
-          # Outgoing Rules, based on Port and Selectors
-          egressRules:
-            - selectors: []
-              ports:
-                - port: 2
-                  protocol: UDP
-            - ports:
-                - port: 443
-                  protocol: TCP
-              selectors:
-                - podSelector:
-                    matchLabels:
-                      app: myapplication
-                      version: '1.0'
-
-          # 2nd example
-        - name: netpol2
-          active: true
-
-          podSelector: {}
-
-          # Incoming Rules, based on ipBlock and Selectors
-          ingressRules:
-            - selectors:
-                  - podSelector: {}
-                  - namespaceSelector:
-                      matchLabels:
-                        testnamespace: "testnamespace"
-                  - ipBlock:
-                      cidr: 127.0.0.1/24
-                      except:
-                        - 127.0.0.2/32
-              ports:
-                - protocol: TCP
-                  port: 443
-```
-
-## Bring Everything Together
-
-Mona and Peter requested the new Namespaces **my-main-app-project-1** and **my-main-app-project-2** for their project **my-main-app**. They defined the name, which group shall have access and the quota and network policies they will require. Maybe they ordered such project via some tooling, like Jira. 
-
-The administrator of the cluster created a new folder and a values-file that define all required parameters. 
-
-**NOTE** A full example can be found in my GitHub repository: [values.yaml](https://github.com/tjungbauer/openshift-cluster-bootstrap/blob/main/tenant-projects/my-main-app/cluster-local/values.yaml)
-
-The ApplicationSet will automatically fetch the new folder and create the Application inside Argo CD. 
-
-GitOps uses the Helm Chart and would like to create all requested objects. 
-
-![Argo CD Onboarding](images/onboarding.png)
-
-Once synchronised, Mona can log into the application scoped GitOps instance and create the Applications she requires and sync here workload onto the cluster. She is limited by the AppProject and can only use the allowed Namespaces, clusters, repositories etc.
 
 ![Mona's Applications](images/mona-app.png)
-
-## But isn't this quite complex? 
-
-Yes, defining everything in one file can be quite complex. The generation of this file can be automated with Ansible for example. Moreover, not everything must be used. For example, if you do not want to work with Quota or LimitRanges, just disable them or remove the block in the values-file. However, there is another method ->
-
-## Project T-Shirt Sizes
-
-While working on this article and collecting some feedback, a discussion about the possibility to simply define T-Shirt sizes for a project was started. Wouldn't it be good to simply define T-Shirt sizes with default settings and then use these definitions to create a new tenant. Still, the possibility to change settings for specific project should be allowed. 
-
-I added this feature and the configurations for each project is now simplified: 
-
-### Values File: values-global.yaml with T-Shirt sized projects
-
-The first change was done in the global values-files. The global settings **allowed_source_repos** and **tshirt_sizes** have been added. It now looks like the following: 
-
-```yaml
----
-
-global:
-  # Namespace of application scoped GitOps instance, that is responsible to deploy workload onto the clusters
-  application_gitops_namespace: gitops-application
-
-  # cluster environments. A list of clusters that are known in Argo CD
-  # name and url must be equal to what is defined in Argo CD
-  envs:
-    - name: in-cluster
-      url: https://kubernetes.default.svc
-    - name: prod-cluster
-      url: https://production.cluster
-
-  # Repositories projects are allowed to use. These are configured on a global level and used if not specified in a _T-Shirt_ project. 
-  # Can be overwritten for projects in their specific values-file
-  allowed_source_repos: # <1>
-    - "https://myrepo"
-    - "https://the-second-repo"
-
-  tshirt_sizes: # <2>
-    - name: XL
-      quota:
-        pods: 100
-        limits:
-          cpu: 4
-          memory: 4Gi
-        requests:
-          cpu: 1
-          memory: 2Gi     
-    - name: L
-      quota:
-        limits:
-          cpu: 2
-          memory: 2Gi
-        requests:
-          cpu: 1
-          memory: 1Gi 
-    - name: S
-      quota: # <3>
-        limits:
-          cpu: 1
-          memory: 1Gi
-        requests:
-          cpu: 500m
-          memory: 1Gi
-      limitRanges: # <4>
-        container:
-          default:
-            cpu: 1
-            memory: 4Gi
-          defaultRequest:
-            cpu: 1
-            memory: 2Gi
-```
-**<1>** Repositories that are allowed inside the AppProject. Can be overwritten for individual projects. \
-**<2>** T-Shirt sizes for projects. Currently defined: XL, L, S \
-**<3>** Default Quota settings for the S-Size \
-**<4>** Default LimitRanges for the S-Size
-
-### Values File: values.yaml with T-Shirt sized projects
-
-Like the global values-file the values-file for the individual project on the specific cluster is slightly changed.
-
-It can now define the parameter **project_size** which must be one of the sizes defined in the global values-file. LimitRanges, ResourceQuota and the list of allowed repositories that are set here, will overwrite the default settings (Only the values that are set here, will be used to overwrite the defaults.) The management of NetworkPolicies (default or custom) stays the same. For the Argo CD RBAC definition default values are used, but still it would be possible to define the whole block are described above here (but we want to keep it simple) 
-
-```yaml
-# Group that is allowed in RBAC. This group can either be created using this Helm Chart (will be named as <namespace>-admin) or must be known (for example synced via LDAP Group Sync)
-oidc_groups: &oidc-group my-tshirt-size-app-admins
-
-# Environment to which these values are valid, this should be the cluster name as defined in the values-global.yaml
-# In best case the same is equal to the folder we are currntly in, but this is optional.
-environment: &environment in-cluster
-
-# Parameters handed over to Sub-Chart helper-proj-onboarding
-helper-proj-onboarding:
-
-  environment: *environment
-
-  # List of namespaces this tenant shall manage.
-  # A tenant or project may consist of multiple namespace
-  namespaces:
-
-    # Name of the first Namespace
-    - name: &name my-tshirt-size-app
-
-      # Is this Namespace enabled or not
-      enabled: true
-
-      project_size: "S"  # <1>
-
-      # Override specific quota settings individually
-      resourceQuotas: # <2>
-        limits:
-          cpu: 10
-
-      local_admin_group: # <3>
-        enabled: true
-        # group_name: my_group_name
-        # optional parameter, default would be "admin"
-        clusterrole: admin
-        # List of users
-        users:
-          - mona
-          - peter
-
-      # Allowed repositories for this project, overwrites the default settings. 
-      # allowed_source_repos: # <4>
-      #  - "https://my-personal-repo"
-      #  - "https://my-second-personal-repo"
-
-      # Network Policies ... these are a bit more complex, when you want to keep them fully configurable.
-      # Maybe the following is too much to manage, anyway, let's start
-
-      # 5 default network policies will be created everytime, unless you overwrite them here
-      # You can remove this whole block to have the policies created or you can select specific policies
-      # which shall be disabled.
-      # The 5 policies are:
-      #    - Allow Ingress traffic from the OpenShift Router
-      #    - Allow OpenShift Monitoring to access and fetch metrics
-      #    - Allow inner namespace communication (pod to pod of the same Namespace)
-      #    - Allow Kube API Server
-      #    - Forbid ANY Egress traffic
-
-      # For example: I would like to disable "deny all egress" (which means the Pods can reach any external destination).
-      default_policies: # <5>
-      #  disable_allow_from_ingress: false
-      #  disable_allow_from_monitoring: false
-      #  disable_allow_from_same_namespace: false
-      #  disable_allow_kube_apiserver: false
-        disable_deny_all_egress: true  # This default policy will not be created, while the others will be.
-
-      # Overwrite LimitRanges per project
-      limitRanges: # <6>
-        enabled: true
-        container:
-          max:
-            cpu: 4
-            memory: 10Gi
-          min:
-            cpu: 1
-            memory: 100Mi
-```
-**<1>** T-Shirt size as defined in the global values-files \
-**<2>** Overwrite specific values for ResourceQuota \
-**<3>** Define Group administrator \
-**<4>** Overwrite the allowed repository list \
-**<5>** Default NetworkPolicies, that might be disabled. \
-**<6>** Overwrite specific values for LimitRanges
-
-Like the other project onboardings the ApplicationSet will automatically fetch it: 
-
-![Argo CD Onboarding T-Shirt Size](images/onboarding-tshirt.png)
-
-To use the power of labels, the actual T-Shirt size is added to the Namespace object:
-
-```yaml
-apiVersion: v1
-kind: Namespace
-metadata:
-  labels:
-[...]
-    namespace-size: S
-  name: my-tshirt-size-app
-``````
-
-## Summary 
-
-This concludes this article and how it is possible to onboard new projects into OpenShift using a GitOps approach. It is one option of many. I personally prefer Helm Charts over plain yaml or Kustomize, simply because it can be repeated anytime. However, Kustomize or plain yaml will work as well. The most important part here is not the actual tool, but that all objects and any configurations are defined in Git where a GitOps agent (in our case Argo CD) can fetch them and sync them onto the cluster.
